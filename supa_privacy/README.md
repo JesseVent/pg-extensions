@@ -1,4 +1,6 @@
-# supa_privacy - PostgreSQL Data Anonymisation TLE Extension
+# supa_privacy - It's not just private, it's supa private.
+
+## PostgreSQL Data Anonymisation TLE Extension
 
 `supa_privacy` is a relocatable, pure SQL PostgreSQL **Trusted Language Extension (TLE)** designed for database-side data de-identification, compliance, and sandbox security. It provides standard masking, hashing, and perturbation functions and is fully optimized for **[database.dev](https://database.dev)** and **Supabase**.
 
