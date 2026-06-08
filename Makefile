@@ -15,7 +15,8 @@ reset:
 tle.install: \
 	tle.install.pg_idkit \
 	tle.install.is_even \
-	tle.install.supa_privacy
+	tle.install.supa_privacy \
+	tle.install.supa_profile
 	@echo "\n\nDone!"
 
 tle.install.%:
