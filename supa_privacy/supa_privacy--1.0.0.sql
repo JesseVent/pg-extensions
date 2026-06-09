@@ -42,8 +42,8 @@ $$ LANGUAGE plpgsql IMMUTABLE STRICT;
 -- 2. PHONE MASKING (Formatting-Preserving)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION @extschema@.mask_phone_flexible(
-    phone text, 
-    keep_digits int DEFAULT 4, 
+    phone text,
+    keep_digits int DEFAULT 4,
     mask_char char DEFAULT '*'
 )
 RETURNS text AS $$
@@ -77,7 +77,7 @@ BEGIN
             result := result || char_val;
         END IF;
     END LOOP;
-    
+
     RETURN result;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
@@ -151,8 +151,8 @@ END;
 $$ LANGUAGE plpgsql VOLATILE;
 
 CREATE OR REPLACE FUNCTION @extschema@.perturb_numeric_deterministic(
-    val numeric, 
-    seed_key text, 
+    val numeric,
+    seed_key text,
     max_deviation numeric DEFAULT 0.07
 )
 RETURNS numeric AS $$
@@ -166,10 +166,10 @@ BEGIN
 
     -- Convert SHA-256 hash fragment to a big integer deterministically
     raw_hash := ('x' || left(encode(sha256(convert_to(seed_key, 'UTF8')), 'hex'), 15))::bit(60)::bigint;
-    
+
     -- Normalize big integer to a 0.0 .. 1.0 range (divide by 2^60 - 1)
     normalized_rand := abs(raw_hash)::numeric / 1152921504606846975.0;
-    
+
     -- Map normalized value to the deviation bounds
     RETURN val * (1.0 + (normalized_rand * (max_deviation * 2.0) - max_deviation));
 END;
@@ -190,8 +190,8 @@ END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION @extschema@.shift_date_deterministic(
-    val date, 
-    seed_key text, 
+    val date,
+    seed_key text,
     max_days int DEFAULT 30
 )
 RETURNS date AS $$
@@ -205,10 +205,10 @@ BEGIN
 
     -- Convert SHA-256 hash fragment to a big integer deterministically
     raw_hash := ('x' || left(encode(sha256(convert_to(seed_key, 'UTF8')), 'hex'), 15))::bit(60)::bigint;
-    
+
     -- Map to a shift in days between [-max_days, max_days]
     shift_days := (abs(raw_hash) % (max_days * 2 + 1)) - max_days;
-    
+
     RETURN val + shift_days;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
@@ -262,27 +262,27 @@ BEGIN
     LOOP
         col_name := column_record.attname;
         col_type := column_record.type_desc;
-        
+
         -- Check if there is a rule defined for this column
         rule := rules -> col_name;
-        
+
         IF rule IS NOT NULL THEN
             rule_type := rule ->> 'type';
-            
+
             CASE rule_type
                 WHEN 'email' THEN
                     select_expr := '@extschema@.mask_email(' || quote_ident(col_name) || '::text)';
-                
+
                 WHEN 'phone' THEN
                     IF (rule ->> 'keep_digits') IS NOT NULL THEN
                         select_expr := '@extschema@.mask_phone_flexible(' || quote_ident(col_name) || '::text, ' || (rule ->> 'keep_digits') || ')';
                     ELSE
                         select_expr := '@extschema@.mask_phone(' || quote_ident(col_name) || '::text)';
                     END IF;
-                
+
                 WHEN 'hash' THEN
                     select_expr := '@extschema@.salted_hash(' || quote_ident(col_name) || '::text, ' || quote_literal(coalesce(rule ->> 'salt', '')) || ')';
-                
+
                 WHEN 'perturb' THEN
                     seed_col := rule ->> 'seed_column';
                     IF seed_col IS NOT NULL THEN
@@ -290,7 +290,7 @@ BEGIN
                     ELSE
                         select_expr := '@extschema@.perturb_numeric(' || quote_ident(col_name) || '::numeric, ' || coalesce(rule ->> 'variance', '0.07') || ')';
                     END IF;
-                
+
                 WHEN 'shift_date' THEN
                     seed_col := rule ->> 'seed_column';
                     IF seed_col IS NOT NULL THEN
@@ -298,29 +298,29 @@ BEGIN
                     ELSE
                         select_expr := '@extschema@.shift_date_deterministic(' || quote_ident(col_name) || '::date, ' || quote_literal('default_seed') || ', ' || coalesce(rule ->> 'days', '30') || ')';
                     END IF;
-                
+
                 WHEN 'generalize_numeric' THEN
                     select_expr := '@extschema@.generalize_numeric(' || quote_ident(col_name) || '::numeric, ' || coalesce(rule ->> 'bucket', '10') || ')';
-                
+
                 WHEN 'generalize_date' THEN
                     select_expr := '@extschema@.generalize_date(' || quote_ident(col_name) || '::date, ' || quote_literal(coalesce(rule ->> 'bucket', 'month')) || ')';
-                
+
                 WHEN 'redact' THEN
                     IF (rule ->> 'value') IS NULL OR (rule ->> 'value') = 'NULL' THEN
                         select_expr := 'NULL';
                     ELSE
                         select_expr := quote_literal(rule ->> 'value');
                     END IF;
-                
+
                 WHEN 'custom' THEN
                     -- Replace placeholder {col} with the actual quoted column identifier
                     select_expr := replace(rule ->> 'expression', '{col}', quote_ident(col_name));
-                
+
                 ELSE
                     -- Unknown rule type: default to as-is
                     select_expr := quote_ident(col_name);
             END CASE;
-            
+
             -- Ensure expression is cast back to the original column type
             select_expr := '(' || select_expr || ')::' || col_type;
         ELSE
@@ -340,3 +340,48 @@ BEGIN
     EXECUTE sql_stmt;
 END;
 $$ LANGUAGE plpgsql VOLATILE;
+
+
+-- ---------------------------------------------------------------------
+-- 9. ROLE GRANTS (Supabase)
+-- ---------------------------------------------------------------------
+-- The masking helpers execute with the *invoker's* privileges, so any
+-- role that calls them directly (PostgREST RPC, or an invoker-side
+-- wrapper function such as the get_secured_customers() pattern) needs
+-- USAGE on the extension schema and EXECUTE on the functions.
+--
+-- NOTE: querying a masked VIEW does NOT require these grants -- a view
+-- accesses its referenced functions/tables as the view OWNER, so the
+-- client only needs SELECT on the view itself.
+--
+-- Wrapped in role-existence checks so CREATE EXTENSION still succeeds on
+-- non-Supabase Postgres where anon/authenticated do not exist.
+-- @extschema@ is substituted by pg_tle with the install schema, so this
+-- stays relocatable.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        GRANT USAGE ON SCHEMA @extschema@ TO anon;
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA @extschema@ TO anon;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        GRANT USAGE ON SCHEMA @extschema@ TO authenticated;
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA @extschema@ TO authenticated;
+    END IF;
+
+    -- create_masked_view() runs dynamic DDL (CREATE VIEW). Keep it out of
+    -- reach of untrusted client roles: an admin/owner should create the
+    -- masked view once, then expose it via GRANT SELECT on the view.
+    -- Remove these REVOKEs if you deliberately want clients to build their
+    -- own masked views.
+    REVOKE EXECUTE ON FUNCTION @extschema@.create_masked_view(regclass, text, jsonb) FROM PUBLIC;
+
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        REVOKE EXECUTE ON FUNCTION @extschema@.create_masked_view(regclass, text, jsonb) FROM anon;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        REVOKE EXECUTE ON FUNCTION @extschema@.create_masked_view(regclass, text, jsonb) FROM authenticated;
+    END IF;
+END $$;
