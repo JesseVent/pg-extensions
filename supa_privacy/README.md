@@ -25,13 +25,13 @@ CREATE EXTENSION IF NOT EXISTS "pg_tle";
 Using the [dbdev CLI](https://supabase.github.io/dbdev):
 
 ```bash
-dbdev add -o ./migrations -s extensions -v 1.0.0 package -n "jvent@supa_privacy"
+dbdev add -o ./migrations -s extensions -v 1.0.1 package -n "jvent@supa_privacy"
 ```
 
 This will generate a migration file in your `./migrations` folder containing the SQL required to load the extension. After applying the migration, enable the extension:
 
 ```sql
-CREATE EXTENSION "jvent@supa_privacy" VERSION '1.0.0' SCHEMA supa_privacy;
+CREATE EXTENSION "jvent@supa_privacy" VERSION '1.0.1' SCHEMA supa_privacy;
 ```
 
 ---
